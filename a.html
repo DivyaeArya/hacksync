@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic RAG & Web Search</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        .chat-bubble { max-width: 80%; }
+        .thought-log { font-family: 'Courier New', monospace; font-size: 0.85rem; }
+        /* Custom scrollbar for terminal */
+        .terminal-scroll::-webkit-scrollbar { width: 8px; }
+        .terminal-scroll::-webkit-scrollbar-track { background: #1f2937; }
+        .terminal-scroll::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+    </style>
+</head>
+<body class="h-screen flex flex-col md:flex-row overflow-hidden">
+
+    <div class="w-full md:w-2/3 flex flex-col h-full bg-white shadow-xl z-10">
+        
+        <div class="bg-indigo-600 text-white p-4 flex justify-between items-center shadow-md">
+            <div class="flex items-center gap-3">
+                <div class="bg-white/20 p-2 rounded-full">
+                    <i class="fa-solid fa-robot text-xl"></i>
+                </div>
+                <div>
+                    <h1 class="font-bold text-lg">Agentic Assistant</h1>
+                    <p class="text-xs text-indigo-200">RAG (Product) • Web (Tavily) • General (LLM)</p>
+                </div>
+            </div>
+            <div class="flex items-center gap-2 text-xs bg-indigo-800 py-1 px-3 rounded-full" id="status-badge">
+                <div class="w-2 h-2 rounded-full bg-gray-400 animate-pulse" id="status-dot"></div>
+                <span id="status-text">Connecting...</span>
+            </div>
+        </div>
+
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-4 bg-gray-50">
+            <div class="flex justify-start">
+                <div class="bg-white border border-gray-200 text-gray-800 rounded-2xl rounded-tl-none py-3 px-5 shadow-sm chat-bubble">
+                    Hello! I am your intelligent assistant. I can check our local inventory, search the live web for news, or just chat. How can I help?
+                </div>
+            </div>
+        </div>
+
+        <div class="p-4 bg-white border-t border-gray-100">
+            <form id="chat-form" class="flex gap-3 relative">
+                <input 
+                    type="text" 
+                    id="user-input" 
+                    class="w-full bg-gray-100 border-0 rounded-xl px-5 py-4 focus:ring-2 focus:ring-indigo-500 focus:bg-white transition-all outline-none" 
+                    placeholder="Ask about products, news, or general questions..." 
+                    autocomplete="off"
+                >
+                <button 
+                    type="submit" 
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 rounded-xl transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+                    id="send-btn"
+                >
+                    <i class="fa-solid fa-paper-plane"></i>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <div class="w-full md:w-1/3 bg-gray-900 text-gray-300 flex flex-col border-l border-gray-800 h-1/3 md:h-full">
+        <div class="bg-gray-800 p-3 text-xs font-bold uppercase tracking-wider text-gray-400 flex justify-between items-center">
+            <span><i class="fa-solid fa-terminal mr-2"></i>Agent Terminal</span>
+            <span class="text-xs text-gray-600">Logs & Logic</span>
+        </div>
+        
+        <div id="terminal-logs" class="flex-1 overflow-y-auto p-4 space-y-3 terminal-scroll thought-log">
+            <div class="text-gray-500 italic text-xs text-center mt-10">
+                Agent thoughts, routing decisions, and search results will appear here...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const terminalLogs = document.getElementById('terminal-logs');
+        const userInput = document.getElementById('user-input');
+        const chatForm = document.getElementById('chat-form');
+        const sendBtn = document.getElementById('send-btn');
+        const statusText = document.getElementById('status-text');
+        const statusDot = document.getElementById('status-dot');
+
+        const API_URL = "http://localhost:8000";
+
+        // 1. Health Check on Load
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API_URL}/health`);
+                const data = await res.json();
+                if (data.status === "healthy") {
+                    statusText.innerText = "Online";
+                    statusDot.classList.remove('bg-gray-400');
+                    statusDot.classList.add('bg-green-400');
+                }
+            } catch (e) {
+                statusText.innerText = "Offline";
+                statusDot.classList.remove('bg-gray-400', 'bg-green-400');
+                statusDot.classList.add('bg-red-500');
+                appendMessage("system", "⚠️ Error: Cannot connect to backend server. Make sure main.py is running on port 8000.");
+            }
+        }
+        checkHealth();
+
+        // 2. Handle Form Submission
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const query = userInput.value.trim();
+            if (!query) return;
+
+            // UI: Add User Message
+            appendMessage('user', query);
+            userInput.value = '';
+            setLoading(true);
+
+            // UI: Clear Terminal for new turn
+            terminalLogs.innerHTML = '<div class="text-gray-600 border-b border-gray-800 pb-2 mb-2">Processing new request...</div>';
+
+            try {
+                const response = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+
+                if (!response.ok) throw new Error("API Error");
+
+                const data = await response.json();
+
+                // 3. Render Thoughts in Terminal
+                data.messages.forEach(msg => {
+                    if (msg.type === 'thought') {
+                        appendLog(msg.content, msg.timestamp);
+                    }
+                });
+
+                // 4. Render Final Answer in Chat
+                appendMessage('agent', data.final_answer);
+
+            } catch (err) {
+                appendMessage('system', "❌ Something went wrong. Check the console or backend logs.");
+                console.error(err);
+            } finally {
+                setLoading(false);
+            }
+        });
+
+        // Helper: Add Message to Chat
+        function appendMessage(sender, text) {
+            const div = document.createElement('div');
+            div.className = `flex ${sender === 'user' ? 'justify-end' : 'justify-start'}`;
+            
+            const bubble = document.createElement('div');
+            // Markdown-ish line breaks
+            const formattedText = text.replace(/\n/g, '<br>');
+
+            if (sender === 'user') {
+                bubble.className = "bg-indigo-600 text-white rounded-2xl rounded-tr-none py-3 px-5 shadow-md chat-bubble";
+            } else if (sender === 'system') {
+                bubble.className = "bg-red-100 text-red-600 border border-red-200 rounded-xl py-2 px-4 text-sm w-full text-center";
+            } else {
+                bubble.className = "bg-white border border-gray-200 text-gray-800 rounded-2xl rounded-tl-none py-3 px-5 shadow-sm chat-bubble";
+            }
+            
+            bubble.innerHTML = formattedText;
+            div.appendChild(bubble);
+            chatContainer.appendChild(div);
+            scrollToBottom(chatContainer);
+        }
+
+        // Helper: Add Log to Terminal
+        function appendLog(text, time) {
+            const div = document.createElement('div');
+            div.className = "mb-3 border-l-2 border-indigo-500 pl-3";
+            
+            // formatting timestamp
+            const timeStr = time ? new Date(time).toLocaleTimeString() : '';
+
+            // Icon selection based on content
+            let icon = '⚡';
+            let color = 'text-gray-400';
+            
+            if (text.includes("Decision")) { icon = '🔀'; color = 'text-yellow-400 font-bold'; }
+            else if (text.includes("Searching")) { icon = '🔍'; color = 'text-blue-400'; }
+            else if (text.includes("Data Found")) { icon = '📄'; color = 'text-green-400'; }
+            else if (text.includes("Synthesizing")) { icon = '✨'; color = 'text-purple-400'; }
+            else if (text.includes("Error")) { icon = '❌'; color = 'text-red-400'; }
+
+            div.innerHTML = `
+                <div class="flex justify-between text-gray-600 text-[10px] mb-1">
+                    <span>${icon} AGENT LOG</span>
+                    <span>${timeStr}</span>
+                </div>
+                <div class="${color} break-words whitespace-pre-wrap">${text}</div>
+            `;
+            terminalLogs.appendChild(div);
+            scrollToBottom(terminalLogs);
+        }
+
+        function setLoading(isLoading) {
+            sendBtn.disabled = isLoading;
+            userInput.disabled = isLoading;
+            if (isLoading) {
+                sendBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            } else {
+                sendBtn.innerHTML = '<i class="fa-solid fa-paper-plane"></i>';
+                userInput.focus();
+            }
+        }
+
+        function scrollToBottom(element) {
+            element.scrollTop = element.scrollHeight;
+        }
+    </script>
+</body>
+</html>
